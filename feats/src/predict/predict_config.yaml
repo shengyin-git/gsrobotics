@@ -1,0 +1,13 @@
+norm_file: ../../data/labels/normalization_08042025_122519.npy
+model: ../../models/unet_09042025_124903_80.pt
+calibration_file: null
+enc_chs: [3, 16, 32, 64, 128, 256]
+dec_chs: [256, 128, 64, 32, 16]
+output_size: [24, 32]
+
+# Reconstruction3D and visualization settings (resolved relative to repo root)
+nn_model_path: ./models/nnmini.pt
+cmap_txt_path: ./cmap.txt
+cmap_in_BGR_format: true
+marker_mask_min: 0
+marker_mask_max: 70
