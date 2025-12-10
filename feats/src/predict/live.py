@@ -324,7 +324,7 @@ def main(config):
     """
 
     # initialize camera
-    cam = cv2.VideoCapture(4) # 0 4
+    cam = cv2.VideoCapture(0) # 0 4
 
     # specify device
     if torch.backends.mps.is_available():
