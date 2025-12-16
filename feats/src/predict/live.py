@@ -31,6 +31,12 @@ if repo_root not in sys.path:
 from utilities.reconstruction import Reconstruction3D
 from utilities.image_processing import trim_outliers, normalize_array, apply_cmap, color_map_from_txt
 
+## to do list:
+## 1. implement force zeroing by considering distributions instead of simple averaging
+## 2. implement force center and magnitude visualization on the plots for maximum forces
+## 3. implement better visualization for depth and contact mask using reconstruction3D class
+## 4. implement calibration option for reconstruction3D class
+## 5. clean up the code
 
 def capture_image(cam, imgw=320, imgh=240):
     """
@@ -61,57 +67,194 @@ def capture_image(cam, imgw=320, imgh=240):
     return img
 
 
-def make_prediction(img, model, device, config):
-    """
-    Make prediction using the unet model.
+# def reform_img_feats(f0, imgw=320, imgh=240):
+#     """
+#     Capture image from GelSight Mini and process it.
 
-    :param img: input image
-    :param model: unet model
-    :param device: device to run the model
-    :param config: configuration file
-    :return: predicted grid x, y, z
-    """
+#     :param f0
+#     :param imgw: width of the image
+#     :param imgh: height of the image
+#     :return: processed image
+#     """
 
-    # store data in dictionary
-    data = {}
-    data["gs_img"] = img
+#     # resize, crop and resize back
+#     img = cv2.resize(f0, (895, 672))  # size suggested by janos to maintain aspect ratio
+#     border_size_x, border_size_y = int(img.shape[0] * (1 / 7)), int(np.floor(img.shape[1] * (1 / 7)))  # remove 1/7th of border from each size
+#     img = img[border_size_x:img.shape[0] - border_size_x, border_size_y:img.shape[1] - border_size_y]
+#     img = img[:, :-1]  # remove last column to get a popular image resolution
+#     img = cv2.resize(img, (imgw, imgh))  # final resize for 3d
 
-    # normalize data
-    data = normalize(data, config["norm_file"])
+#     # convert bgr to rgb
+#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # convert to torch tensor
-    gs_img = torch.from_numpy(data["gs_img"]).float()
-    gs_img = gs_img.unsqueeze(0).permute(0, 3, 1, 2).to(device)
+#     return img
 
-    # load calibration file
-    if config["calibration_file"] is not None:
-        calibration = np.load(config["calibration_file"])
-        rows, cols = 240, 320
-        M = np.float32([[1, 0, calibration[0]], [0, 1, calibration[1]]])
 
-    # prepare input data
-    if config["calibration_file"] is not None:
-        inputs_prewarp = data["gs_img"]
-        inputs_warp = cv2.warpAffine(inputs_prewarp,  M, (cols, rows), borderMode=cv2.BORDER_REPLICATE)
-        inputs = torch.from_numpy(inputs_warp).permute(2, 0, 1).unsqueeze(0).float().to(device)
-    else:
-        inputs = gs_img
+# def reform_img_depth(f0, imgw=320, imgh=240):
+#     """
+#     Capture image from GelSight Mini and process it.
 
-    # get model prediction
-    outputs = model(inputs)
+#     :param f0
+#     :param imgw: width of the image
+#     :param imgh: height of the image
+#     :return: processed image
+#     """
 
-    # unnormalize the outputs
-    outputs_transf = outputs.squeeze(0).permute(1, 2, 0)
-    pred_grid_x = unnormalize(outputs_transf[:, :, 0], "grid_x", config["norm_file"])
-    pred_grid_y = unnormalize(outputs_transf[:, :, 1], "grid_y", config["norm_file"])
-    pred_grid_z = unnormalize(outputs_transf[:, :, 2], "grid_z", config["norm_file"])
+#     # resize, crop and resize back
+#     img = cv2.resize(f0, (895, 672))  # size suggested by janos to maintain aspect ratio
+#     border_size_x, border_size_y = int(img.shape[0] * (1 / 7)), int(np.floor(img.shape[1] * (1 / 7)))  # remove 1/7th of border from each size
+#     img = img[border_size_x:img.shape[0] - border_size_x, border_size_y:img.shape[1] - border_size_y]
+#     img = img[:, :-1]  # remove last column to get a popular image resolution
+#     img = cv2.resize(img, (imgw, imgh))  # final resize for 3d
 
-    # convert to numpy
-    pred_grid_x = pred_grid_x.cpu().detach().numpy()
-    pred_grid_y = pred_grid_y.cpu().detach().numpy()
-    pred_grid_z = pred_grid_z.cpu().detach().numpy()
+#     # convert bgr to rgb
+#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    return pred_grid_x, pred_grid_y, pred_grid_z
+#     return img
+
+class force_prediction:
+    def __init__(self):
+        self.force_zero_counter = 0
+        self.pred_grid_x_zero, self.pred_grid_y_zero, self.pred_grid_z_zero = None, None, None
+    
+    def make_prediction(self, img, model, device, config):
+        """
+        Make prediction using the unet model.
+
+        :param img: input image
+        :param model: unet model
+        :param device: device to run the model
+        :param config: configuration file
+        :return: predicted grid x, y, z
+        """
+
+        # store data in dictionary
+        data = {}
+        data["gs_img"] = img
+
+        # normalize data
+        data = normalize(data, config["norm_file"])
+
+        # convert to torch tensor
+        gs_img = torch.from_numpy(data["gs_img"]).float()
+        gs_img = gs_img.unsqueeze(0).permute(0, 3, 1, 2).to(device)
+
+        # load calibration file
+        if config["calibration_file"] is not None:
+            calibration = np.load(config["calibration_file"])
+            rows, cols = 240, 320
+            M = np.float32([[1, 0, calibration[0]], [0, 1, calibration[1]]])
+
+        # prepare input data
+        if config["calibration_file"] is not None:
+            inputs_prewarp = data["gs_img"]
+            inputs_warp = cv2.warpAffine(inputs_prewarp,  M, (cols, rows), borderMode=cv2.BORDER_REPLICATE)
+            inputs = torch.from_numpy(inputs_warp).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        else:
+            inputs = gs_img
+
+        # get model prediction
+        outputs = model(inputs)
+
+        # unnormalize the outputs
+        outputs_transf = outputs.squeeze(0).permute(1, 2, 0)
+        pred_grid_x = unnormalize(outputs_transf[:, :, 0], "grid_x", config["norm_file"])
+        pred_grid_y = unnormalize(outputs_transf[:, :, 1], "grid_y", config["norm_file"])
+        pred_grid_z = unnormalize(outputs_transf[:, :, 2], "grid_z", config["norm_file"])
+
+        # convert to numpy
+        pred_grid_x = pred_grid_x.cpu().detach().numpy()
+        pred_grid_y = pred_grid_y.cpu().detach().numpy()
+        pred_grid_z = pred_grid_z.cpu().detach().numpy()
+
+        if self.force_zero_counter < 50:
+
+            # Update zero force for the first 50 frames.
+            if self.force_zero_counter == 0:
+                self.pred_grid_x_zero = pred_grid_x
+                self.pred_grid_y_zero = pred_grid_y
+                self.pred_grid_z_zero = pred_grid_z
+                print("Zeroing force. Please do not touch the sensor...")
+            else:
+                self.pred_grid_x_zero += pred_grid_x
+                self.pred_grid_y_zero += pred_grid_y
+                self.pred_grid_z_zero += pred_grid_z
+
+            if self.force_zero_counter == 49:
+                self.pred_grid_x_zero /= (
+                    self.force_zero_counter + 1
+                )  # +1 to include current frame
+                self.pred_grid_y_zero /= (
+                    self.force_zero_counter + 1
+                )
+                self.pred_grid_z_zero /= (
+                    self.force_zero_counter + 1
+                )
+
+        if self.force_zero_counter == 50:
+            print("Force prediction is ready to use.")
+
+        self.force_zero_counter += 1
+
+        # Subtract the accumulated zero depth for normalization.
+        pred_grid_x -= self.pred_grid_x_zero
+        pred_grid_y -= self.pred_grid_y_zero
+        pred_grid_z -= self.pred_grid_z_zero
+
+        return pred_grid_x, pred_grid_y, pred_grid_z
+    
+
+    def make_prediction_ori(self, img, model, device, config):
+        """
+        Make prediction using the unet model.
+
+        :param img: input image
+        :param model: unet model
+        :param device: device to run the model
+        :param config: configuration file
+        :return: predicted grid x, y, z
+        """
+
+        # store data in dictionary
+        data = {}
+        data["gs_img"] = img
+
+        # normalize data
+        data = normalize(data, config["norm_file"])
+
+        # convert to torch tensor
+        gs_img = torch.from_numpy(data["gs_img"]).float()
+        gs_img = gs_img.unsqueeze(0).permute(0, 3, 1, 2).to(device)
+
+        # load calibration file
+        if config["calibration_file"] is not None:
+            calibration = np.load(config["calibration_file"])
+            rows, cols = 240, 320
+            M = np.float32([[1, 0, calibration[0]], [0, 1, calibration[1]]])
+
+        # prepare input data
+        if config["calibration_file"] is not None:
+            inputs_prewarp = data["gs_img"]
+            inputs_warp = cv2.warpAffine(inputs_prewarp,  M, (cols, rows), borderMode=cv2.BORDER_REPLICATE)
+            inputs = torch.from_numpy(inputs_warp).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        else:
+            inputs = gs_img
+
+        # get model prediction
+        outputs = model(inputs)
+
+        # unnormalize the outputs
+        outputs_transf = outputs.squeeze(0).permute(1, 2, 0)
+        pred_grid_x = unnormalize(outputs_transf[:, :, 0], "grid_x", config["norm_file"])
+        pred_grid_y = unnormalize(outputs_transf[:, :, 1], "grid_y", config["norm_file"])
+        pred_grid_z = unnormalize(outputs_transf[:, :, 2], "grid_z", config["norm_file"])
+
+        # convert to numpy
+        pred_grid_x = pred_grid_x.cpu().detach().numpy()
+        pred_grid_y = pred_grid_y.cpu().detach().numpy()
+        pred_grid_z = pred_grid_z.cpu().detach().numpy()
+
+        return pred_grid_x, pred_grid_y, pred_grid_z
 
 
 def compute_force_center_and_magnitude(force_grid):
@@ -158,8 +301,9 @@ def animate(frame, cam, model, device, config, ims, axs, overlay_artists, persis
     """
 
     # capture image and make prediction
+
     gs_img = capture_image(cam)
-    pred_grid_x, pred_grid_y, pred_grid_z = make_prediction(gs_img, model, device, config)
+    pred_grid_x, pred_grid_y, pred_grid_z = persistent['force_pred'].make_prediction(gs_img, model, device, config)
 
     # update the image data
     ims[0].set_data(pred_grid_x)
@@ -217,52 +361,33 @@ def animate(frame, cam, model, device, config, ims, axs, overlay_artists, persis
     overlay_artists[2].extend(pt_z)
 
     # Update contact mask and depth panels using Reconstruction3D
-    # ims: [im_x, im_y, im_z, im_gs, im_contact, im_depth]
-    if len(ims) >= 6 and 'reconstruction' in persistent and persistent['reconstruction'] is not None:
-        try:
-            reconstruction = persistent['reconstruction']
-            # Get high-quality depth map and contact mask from Reconstruction3D
-            depth_map, contact_mask, grad_x, grad_y = reconstruction.get_depthmap(
-                image=gs_img,
-                markers_threshold=(persistent.get('marker_mask_min', 0.3), 
-                                  persistent.get('marker_mask_max', 0.9))
-            )
-            
-            # Check for NaN values in depth map
-            if np.isnan(depth_map).any():
-                raise ValueError("Depth map contains NaN values")
-            
-            # Process depth map: trim outliers, normalize, and apply colormap
-            depth_map_trimmed = trim_outliers(depth_map, 1, 99)
-            depth_map_normalized = normalize_array(array=depth_map_trimmed, min_divider=10)
-            
-            # Apply colormap to depth if available, otherwise use normalized raw values
-            if 'cmap' in persistent and persistent['cmap'] is not None:
-                depth_rgb = apply_cmap(data=depth_map_normalized, cmap=persistent['cmap'])
-                # apply_cmap returns RGB, convert to 0-1 range for imshow
-                ims[5].set_data(depth_rgb.astype(np.float32) / 255.0)
-            else:
-                # Fallback: use normalized depth as grayscale
-                ims[5].set_data(depth_map_normalized)
-            
-            # Process contact mask: convert to 8-bit grayscale (0-255), then to RGB for display
-            contact_display = (contact_mask * 255).astype(np.uint8)
-            # Convert grayscale to RGB so it displays properly with the existing colormap
-            contact_rgb = cv2.cvtColor(contact_display, cv2.COLOR_GRAY2RGB)
-            # Normalize to 0-1 for imshow
-            ims[4].set_data(contact_rgb.astype(np.float32) / 255.0)
-            
-        except Exception as e:
-            # Fallback to simple contact/depth if Reconstruction3D fails
-            print(f"Warning in Reconstruction3D: {e}")
-            contact_display = (np.abs(pred_grid_z) > 1e-4).astype(np.uint8) * 255
-            ims[4].set_data(contact_display)
-            ims[5].set_data(pred_grid_z)
-    else:
-        # Fallback: use simple UNet-based contact/depth if reconstruction not available
-        contact_display = (np.abs(pred_grid_z) > 1e-4).astype(np.uint8) * 255
-        ims[4].set_data(contact_display)
-        ims[5].set_data(pred_grid_z)
+    reconstruction = persistent['reconstruction']
+    gs_img_depth = cv2.cvtColor(gs_img, cv2.COLOR_BGR2RGB)
+    # Get high-quality depth map and contact mask from Reconstruction3D
+    depth_map, contact_mask, grad_x, grad_y = reconstruction.get_depthmap(
+        image=gs_img_depth,
+        markers_threshold=(config.get('marker_mask_min', 0), 
+                            config.get('marker_mask_max', 70))
+    )
+    
+    # Check for NaN values in depth map
+    if np.isnan(depth_map).any():
+        raise ValueError("Depth map contains NaN values")
+    
+    # Process depth map: trim outliers, normalize, and apply colormap
+    depth_map_trimmed = trim_outliers(depth_map, 1, 99)
+    depth_map_normalized = normalize_array(array=depth_map_trimmed, min_divider=10)
+    
+    depth_rgb = apply_cmap(data=depth_map_normalized, cmap=persistent['cmap'])
+    # apply_cmap returns RGB, convert to 0-1 range for imshow
+    ims[5].set_data(depth_rgb.astype(np.uint8))
+    
+    # Process contact mask: convert to 8-bit grayscale (0-255), then to RGB for display
+    contact_display = (contact_mask * 255).astype(np.uint8)
+    # Convert grayscale to RGB so it displays properly with the existing colormap
+    contact_rgb = cv2.cvtColor(contact_display, cv2.COLOR_GRAY2RGB)
+    # Normalize to 0-1 for imshow
+    ims[4].set_data(contact_rgb.astype(np.uint8))
 
     # Compute per-row force center (x center for each row) and update persistent line
     n_rows, n_cols = pred_grid_z.shape
@@ -324,7 +449,8 @@ def main(config):
     """
 
     # initialize camera
-    cam = cv2.VideoCapture(0) # 0 4
+    cam = cv2.VideoCapture(4) # 0 4
+    img_height, img_width = 240, 320
 
     # specify device
     if torch.backends.mps.is_available():
@@ -348,10 +474,11 @@ def main(config):
     plt.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.08)
 
     # capture first image of the camera
-    gs_img = capture_image(cam)
+    gs_img = capture_image(cam, imgw=img_width, imgh=img_height)
 
     # make initial prediction
-    pred_grid_x, pred_grid_y, pred_grid_z = make_prediction(gs_img, model, device, config)
+    force_pred = force_prediction()
+    pred_grid_x, pred_grid_y, pred_grid_z = force_pred.make_prediction(gs_img, model, device, config)
 
     # hardcode the color limits
     clim_x = (-0.029, 0.029)
@@ -363,14 +490,104 @@ def main(config):
     im_y = axs[1].imshow(pred_grid_y, origin="upper", vmin=clim_y[0], vmax=clim_y[1], animated=True)
     im_z = axs[2].imshow(pred_grid_z, origin="upper", vmin=clim_z[0], vmax=clim_z[1], animated=True)
     im_gs = axs[3].imshow(gs_img.astype(np.uint8), animated=True)
+
+    # Pre-create persistent artists (Z row- and column-center lines) to update each frame
+    persistent = { 'z_row_line': None, 'z_col_line': None }
+    persistent['force_pred'] = force_pred
+    # create empty Line2D objects on axs[2] and store them
+    persistent['z_row_line'], = axs[2].plot([], [], color='magenta', linewidth=2, alpha=0.9)
+    persistent['z_col_line'], = axs[2].plot([], [], color='cyan', linewidth=2, alpha=0.9)
+    # ensure persistent lines are clipped to the axes
+    persistent['z_row_line'].set_clip_on(True)
+    persistent['z_col_line'].set_clip_on(True)
+
+    # load depth prediction model
+    # initialize Reconstruction3D
+    reconstruction = Reconstruction3D(
+        image_width=img_width,
+        image_height=img_height,
+        use_gpu=torch.cuda.is_available()
+    )
     
-    # contact mask (bottom middle) - displayed as grayscale RGB
-    contact_display = np.zeros((gs_img.shape[0], gs_img.shape[1], 3), dtype=np.uint8)
-    im_contact = axs[4].imshow(contact_display, animated=True)
+    # Resolve nn_model_path relative to the actual repo root (not feats copy)
+    # Since feats is a copy, we need to look in the original repo root
+    nn_model_path = config.get("nn_model_path", "./models/nnmini.pt")
     
-    # depth (bottom right) - displayed with colormap applied
-    depth_display = np.zeros((gs_img.shape[0], gs_img.shape[1], 3), dtype=np.uint8)
-    im_depth = axs[5].imshow(depth_display, animated=True)
+    # Try multiple possible locations
+    possible_roots = [
+        Path.cwd(),  # Current working directory (should be repo root when run from there)
+        Path(__file__).resolve().parent.parent.parent,  # feats/src/predict -> feats
+        Path(__file__).resolve().parent.parent.parent.parent,  # feats/src/predict -> repo root
+    ]
+    
+    resolved_path = None
+    for root in possible_roots:
+        candidate = (root / nn_model_path).resolve()
+        if candidate.exists():
+            resolved_path = str(candidate)
+            break
+    
+    if resolved_path is None:
+        raise FileNotFoundError(f"NN model not found. Tried: {[str((r / nn_model_path).resolve()) for r in possible_roots]}")
+    
+    print(f"Loading NN model from: {resolved_path}")
+    reconstruction.load_nn(resolved_path)
+    persistent['reconstruction'] = reconstruction
+    print("NN model loaded successfully.")
+
+    # Load colormap for depth visualization
+    cmap_path = config.get("cmap_txt_path", "./cmap.txt")
+    
+    # Try multiple possible locations
+    possible_roots = [
+        Path.cwd(),  # Current working directory
+        Path(__file__).resolve().parent.parent.parent,  # feats/src/predict -> feats
+        Path(__file__).resolve().parent.parent.parent.parent,  # feats/src/predict -> repo root
+    ]
+    
+    resolved_path = None
+    for root in possible_roots:
+        candidate = (root / cmap_path).resolve()
+        if candidate.exists():
+            resolved_path = str(candidate)
+            break
+    
+    if resolved_path is None:
+        raise FileNotFoundError(f"Colormap not found. Tried: {[str((r / cmap_path).resolve()) for r in possible_roots]}")
+    
+    print(f"Loading colormap from: {resolved_path}")
+    persistent['cmap'] = color_map_from_txt(path=resolved_path, is_bgr=config.get("cmap_in_BGR_format", True))
+    print("Colormap loaded successfully.")
+
+    # Add marker threshold settings to persistent dict
+    persistent['marker_mask_min'] = config.get("marker_mask_min", 0)
+    persistent['marker_mask_max'] = config.get("marker_mask_max", 70)
+
+    gs_img_depth = cv2.cvtColor(gs_img, cv2.COLOR_BGR2RGB)
+    depth_map, contact_mask, grad_x, grad_y = reconstruction.get_depthmap(
+                image=gs_img_depth,
+                markers_threshold=(config.get('marker_mask_min', 0), 
+                                  config.get('marker_mask_max', 70))
+            )
+    
+    # Check for NaN values in depth map
+    if np.isnan(depth_map).any():
+        raise ValueError("Depth map contains NaN values")
+    
+    # Process depth map: trim outliers, normalize, and apply colormap
+    depth_map_trimmed = trim_outliers(depth_map, 1, 99)
+    depth_map_normalized = normalize_array(array=depth_map_trimmed, min_divider=10)
+    
+    depth_rgb = apply_cmap(data=depth_map_normalized, cmap=persistent['cmap'])
+    # apply_cmap returns RGB, convert to 0-1 range for imshow
+    im_depth = axs[5].imshow(depth_rgb.astype(np.uint8), animated=True)
+
+    # Process contact mask: convert to 8-bit grayscale (0-255), then to RGB for display
+    contact_display = (contact_mask * 255).astype(np.uint8)
+    # Convert grayscale to RGB so it displays properly with the existing colormap
+    contact_rgb = cv2.cvtColor(contact_display, cv2.COLOR_GRAY2RGB)
+    # Normalize to 0-1 for imshow
+    im_contact = axs[4].imshow(contact_rgb.astype(np.uint8), animated=True)
 
     # store the images in a list (order: x,y,z,original,contact,depth)
     ims = [im_x, im_y, im_z, im_gs, im_contact, im_depth]
@@ -419,95 +636,6 @@ def main(config):
 
     # Initialize overlay artists dictionary for frame updates
     overlay_artists = {0: [], 1: [], 2: []}
-
-    # Pre-create persistent artists (Z row- and column-center lines) to update each frame
-    persistent = { 'z_row_line': None, 'z_col_line': None }
-    # create empty Line2D objects on axs[2] and store them
-    persistent['z_row_line'], = axs[2].plot([], [], color='magenta', linewidth=2, alpha=0.9)
-    persistent['z_col_line'], = axs[2].plot([], [], color='cyan', linewidth=2, alpha=0.9)
-    # ensure persistent lines are clipped to the axes
-    persistent['z_row_line'].set_clip_on(True)
-    persistent['z_col_line'].set_clip_on(True)
-
-    # Initialize Reconstruction3D for high-fidelity depth and contact maps
-    try:
-        # Get image dimensions from first capture
-        img_height, img_width = gs_img.shape[:2]
-        reconstruction = Reconstruction3D(
-            image_width=img_width,
-            image_height=img_height,
-            use_gpu=torch.cuda.is_available()
-        )
-        
-        # Resolve nn_model_path relative to the actual repo root (not feats copy)
-        # Since feats is a copy, we need to look in the original repo root
-        nn_model_path = config.get("nn_model_path", "./models/nnmini.pt")
-        
-        # Try multiple possible locations
-        possible_roots = [
-            Path.cwd(),  # Current working directory (should be repo root when run from there)
-            Path(__file__).resolve().parent.parent.parent,  # feats/src/predict -> feats
-            Path(__file__).resolve().parent.parent.parent.parent,  # feats/src/predict -> repo root
-        ]
-        
-        resolved_path = None
-        for root in possible_roots:
-            candidate = (root / nn_model_path).resolve()
-            if candidate.exists():
-                resolved_path = str(candidate)
-                break
-        
-        if resolved_path is None:
-            raise FileNotFoundError(f"NN model not found. Tried: {[str((r / nn_model_path).resolve()) for r in possible_roots]}")
-        
-        print(f"Loading NN model from: {resolved_path}")
-        reconstruction.load_nn(resolved_path)
-        persistent['reconstruction'] = reconstruction
-        print("NN model loaded successfully.")
-    except Exception as e:
-        print(f"ERROR: Failed to initialize Reconstruction3D: {e}")
-        raise
-
-    # Load colormap for depth visualization
-    try:
-        cmap_path = config.get("cmap_txt_path", "./cmap.txt")
-        
-        # Try multiple possible locations
-        possible_roots = [
-            Path.cwd(),  # Current working directory
-            Path(__file__).resolve().parent.parent.parent,  # feats/src/predict -> feats
-            Path(__file__).resolve().parent.parent.parent.parent,  # feats/src/predict -> repo root
-        ]
-        
-        resolved_path = None
-        for root in possible_roots:
-            candidate = (root / cmap_path).resolve()
-            if candidate.exists():
-                resolved_path = str(candidate)
-                break
-        
-        if resolved_path is None:
-            raise FileNotFoundError(f"Colormap not found. Tried: {[str((r / cmap_path).resolve()) for r in possible_roots]}")
-        
-        print(f"Loading colormap from: {resolved_path}")
-        persistent['cmap'] = color_map_from_txt(path=resolved_path, is_bgr=config.get("cmap_in_BGR_format", True))
-        print("Colormap loaded successfully.")
-    except Exception as e:
-        print(f"ERROR: Failed to load colormap: {e}")
-        raise
-
-    # Add marker threshold settings to persistent dict
-    persistent['marker_mask_min'] = config.get("marker_mask_min", 0.3)
-    persistent['marker_mask_max'] = config.get("marker_mask_max", 0.9)
-
-    # Warm-up frames: allow sensor to stabilize before animation starts
-    print("Warming up sensor (10 frames)...")
-    warmup_frames = 10
-    for i in range(warmup_frames):
-        _ = capture_image(cam)
-        if (i + 1) % 2 == 0:
-            print(f"  Warm-up frame {i + 1}/{warmup_frames}")
-    print("Sensor ready. Starting live prediction...")
 
     # animate the predictions
     ani = FuncAnimation(fig, animate, frames=None, interval=0, blit=False, fargs=(cam, model, device, config, ims, axs, overlay_artists, persistent), save_count=100)
